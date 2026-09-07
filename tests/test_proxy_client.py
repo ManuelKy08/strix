@@ -234,26 +234,16 @@ async def test_existing_request_ids_queries_current_project(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client = _FakeClient("host")
-    connection = SimpleNamespace(
-        edges=[
-            SimpleNamespace(
-                node=SimpleNamespace(request=SimpleNamespace(id="1042")),
-            )
-        ]
-    )
+    looked_up: list[str] = []
 
-    async def list_requests_with_client(
-        passed_client: Any,
-        *,
-        httpql_filter: str,
-        first: int,
-    ) -> Any:
+    async def get_request_with_client(passed_client: Any, request_id: str) -> Any:
         assert passed_client is client
-        assert httpql_filter == "id.eq:1042 OR id.eq:1088"
-        assert first == 2
-        return connection
+        looked_up.append(request_id)
+        if request_id == "1042":
+            return SimpleNamespace(request=SimpleNamespace(id="1042"))
+        return None
 
-    monkeypatch.setattr(caido_api, "list_requests_with_client", list_requests_with_client)
+    monkeypatch.setattr(caido_api, "get_request_with_client", get_request_with_client)
 
     existing = await tools.existing_request_ids(
         cast("Any", _Ctx({"caido_client": client})),
@@ -261,3 +251,4 @@ async def test_existing_request_ids_queries_current_project(
     )
 
     assert existing == {"1042"}
+    assert looked_up == ["1042", "1088"]

@@ -79,16 +79,19 @@ async def existing_request_ids(
     if client is None:
         raise RuntimeError("Caido client is not available")
 
-    httpql_filter = " OR ".join(f"id.eq:{request_id}" for request_id in request_ids)
-    connection = await _call(
-        client,
-        lambda client: caido_api.list_requests_with_client(
+    # Request IDs are not an HTTPQL field. Resolve each ID through the same
+    # project-bound lookup as view_request rather than constructing a filter.
+    existing: set[str] = set()
+    for request_id in request_ids:
+        result = await _call(
             client,
-            httpql_filter=httpql_filter,
-            first=len(request_ids),
-        ),
-    )
-    return {str(edge.node.request.id) for edge in connection.edges}
+            lambda client, request_id=request_id: caido_api.get_request_with_client(
+                client, request_id
+            ),
+        )
+        if result is not None:
+            existing.add(str(result.request.id))
+    return existing
 
 
 def _to_tool_json(value: Any) -> Any:

@@ -152,6 +152,32 @@ def test_create_report_does_not_commit_when_callback_fails(
     assert report_state.vulnerability_reports == []
 
 
+def test_failed_revision_keeps_old_evidence_and_can_be_retried(
+    report_state: ReportState,
+) -> None:
+    report_id = report_state.add_vulnerability_report(
+        title="Original finding", severity="high", http_exchange_ids=["1042"]
+    )
+    original = dict(report_state.vulnerability_reports[0])
+
+    def fail_persistence(revised: dict[str, Any]) -> None:
+        assert revised["http_exchange_ids"] == ["1088"]
+        assert report_state.vulnerability_reports[0] == original
+        raise RuntimeError("persistence failed")
+
+    report_state.vulnerability_updated_callback = fail_persistence
+    changes = {"title": "Revised finding", "http_exchange_ids": ["1088"]}
+    with pytest.raises(RuntimeError, match="persistence failed"):
+        report_state.update_vulnerability_report(report_id, changes)
+    assert report_state.vulnerability_reports[0] == original
+
+    report_state.vulnerability_updated_callback = None
+    revised = report_state.update_vulnerability_report(report_id, changes)
+    assert revised is not None
+    assert revised["http_exchange_ids"] == ["1088"]
+    assert len(revised["update_history"]) == 1
+
+
 async def test_create_report_requires_evidence_and_assumptions(
     report_state: ReportState,
 ) -> None:

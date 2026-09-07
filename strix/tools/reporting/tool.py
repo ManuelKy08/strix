@@ -1124,8 +1124,13 @@ async def create_vulnerability_report(
         code_locations: White-box findings — list of location objects.
         http_exchange_ids: Proxy request IDs that prove this finding.
             Copy these IDs from ``list_requests`` or ``view_request``.
-            Include only requests that support this finding. Keep the ids
-            out of ``evidence`` and all other report text.
+            For a finding validated over HTTP, capture and inspect the
+            supporting exchanges and include their IDs here before filing.
+            Include relevant baseline/control requests as well as the exploit.
+            Omit only when the finding has no captured HTTP evidence (for
+            example a static-only code finding). Never invent IDs or drop
+            them to bypass a verification error; retry the capture instead.
+            Keep IDs out of ``evidence`` and all other report text.
 
             **How ``fix_before`` / ``fix_after`` work**: they're used as
             literal GitHub/GitLab PR suggestion blocks. When a reviewer

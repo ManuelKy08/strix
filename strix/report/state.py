@@ -490,11 +490,18 @@ class ReportState:
         )
         history.append(entry)
 
-        report.update(changed)
+        revised = {**report, **changed}
         for dependent in superseded:
-            report.pop(dependent, None)
-        report["update_history"] = history
-        report["updated_at"] = entry["timestamp"]
+            revised.pop(dependent, None)
+        revised["update_history"] = history
+        revised["updated_at"] = entry["timestamp"]
+
+        # Persistence must accept the revision before local state changes. A
+        # failed callback leaves the old evidence intact and the update retryable.
+        if self.vulnerability_updated_callback:
+            self.vulnerability_updated_callback(revised)
+        report.clear()
+        report.update(revised)
 
         # The markdown on disk still shows the superseded evidence, so let the
         # writer re-render it.
@@ -505,9 +512,6 @@ class ReportState:
             report_id,
             ", ".join(entry["fields"]) or "no field replaced",
         )
-
-        if self.vulnerability_updated_callback:
-            self.vulnerability_updated_callback(report)
 
         self.save_run_data()
         return report

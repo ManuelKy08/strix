@@ -301,7 +301,7 @@ async def _reap_stalled_agents(coordinator: AgentCoordinator, me: str) -> list[d
     stall_timeout = float(load_settings().runtime.agent_stall_timeout)
     if stall_timeout <= 0:
         return []
-    return await coordinator.reap_stalled(stall_timeout + _STALL_REAP_GRACE_S, exclude=me)
+    return await coordinator.reap_stalled(stall_timeout + _STALL_REAP_GRACE_S, under=me)
 
 
 @function_tool(timeout=_WAIT_HARD_CEILING_S)
@@ -478,9 +478,9 @@ async def wait_for_agents(  # noqa: PLR0911
                     "No messages within timeout — continue work or call agent_finish."
                     if not stalled
                     else "No messages within timeout. The agents in stalled_agents produced "
-                    "no output for too long and were marked failed; their terminal notices "
-                    "are queued for you. Do not wait on them again — continue work, respawn "
-                    "what is still needed, or call agent_finish."
+                    "no output for too long and were marked failed; treat this list as "
+                    "their failure notice. Do not wait on them again — continue work, "
+                    "respawn what is still needed, or call agent_finish."
                 ),
             },
             ensure_ascii=False,

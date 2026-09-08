@@ -215,8 +215,8 @@ class AgentCoordinator:
         if runtime is not None:
             runtime.last_activity = time.monotonic()
 
-    async def reap_stalled(self, max_silence: float, *, exclude: str) -> list[dict[str, Any]]:
-        """Fail every running agent silent for longer than ``max_silence`` seconds.
+    async def reap_stalled(self, max_silence: float, *, under: str) -> list[dict[str, Any]]:
+        """Fail the descendants of ``under`` that were silent for ``max_silence`` seconds.
 
         A turn wedged somewhere no timeout covers never reaches a terminal status,
         so whoever waits on it would wait forever. Cancelling the task ends the
@@ -225,25 +225,32 @@ class AgentCoordinator:
         if max_silence <= 0:
             return []
         now = time.monotonic()
-        stalled: list[tuple[str, asyncio.Task[Any] | None, float]] = []
+        reaped: list[dict[str, Any]] = []
+        tasks: list[asyncio.Task[Any]] = []
         async with self._lock:
-            for aid, status in self.statuses.items():
-                if aid == exclude or status != "running":
-                    continue
+            for aid in self._subtree_order_locked(under):
                 runtime = self.runtimes.get(aid)
-                if runtime is None:
+                if aid == under or runtime is None or self.statuses.get(aid) != "running":
                     continue
                 silence = now - runtime.last_activity
-                if silence >= max_silence:
-                    stalled.append((aid, runtime.task, silence))
-        reaped: list[dict[str, Any]] = []
-        for aid, task, silence in stalled:
-            error = f"agent produced no event for {silence:.0f}s; marked failed as stalled"
-            logger.warning("agent %s stalled: %s", aid, error)
-            await self.set_status(aid, "failed", error=error)
-            if task is not None and not task.done():
-                task.cancel()
-            reaped.append({"agent_id": aid, "name": self.names.get(aid, aid), "error": error})
+                if silence < max_silence:
+                    continue
+                error = f"agent produced no event for {silence:.0f}s; marked failed as stalled"
+                self.statuses[aid] = "failed"
+                self.errors[aid] = error
+                runtime.user_wake_required = True
+                runtime.last_activity = now
+                runtime.wake.set()
+                if runtime.task is not None and not runtime.task.done():
+                    tasks.append(runtime.task)
+                reaped.append({"agent_id": aid, "name": self.names.get(aid, aid), "error": error})
+        for entry in reaped:
+            logger.warning("agent %s stalled: %s", entry["agent_id"], entry["error"])
+            logger.info("agent.status %s=failed", entry["agent_id"])
+        for task in tasks:
+            task.cancel()
+        if reaped:
+            await self._maybe_snapshot()
         return reaped
 
     async def park_waiting(self, agent_id: str, *, wait_kind: WaitKind) -> None:

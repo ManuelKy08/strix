@@ -158,7 +158,7 @@ async def _call_wait(coordinator: AgentCoordinator, args: dict[str, Any]) -> dic
 @pytest.fixture
 def _reap_after(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     async def _reap(coordinator: AgentCoordinator, me: str) -> list[dict[str, Any]]:
-        return await coordinator.reap_stalled(0.3, exclude=me)
+        return await coordinator.reap_stalled(0.3, under=me)
 
     monkeypatch.setattr(graph_tools, "_reap_stalled_agents", _reap)
     yield
@@ -236,5 +236,23 @@ async def test_reaping_is_off_when_disabled() -> None:
     await coordinator.register("child", "X", parent_id="root")
     coordinator.runtimes["child"].last_activity -= 10_000
 
-    assert await coordinator.reap_stalled(0, exclude="root") == []
+    assert await coordinator.reap_stalled(0, under="root") == []
     assert coordinator.statuses["child"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_reaping_stays_inside_the_callers_subtree() -> None:
+    coordinator = AgentCoordinator()
+    await coordinator.register("root", "strix", parent_id=None)
+    await coordinator.register("a", "A", parent_id="root")
+    await coordinator.register("a1", "A1", parent_id="a")
+    await coordinator.register("b", "B", parent_id="root")
+    for aid in ("root", "a1", "b"):
+        coordinator.runtimes[aid].last_activity -= 10_000
+
+    reaped = await coordinator.reap_stalled(1, under="a")
+
+    assert [r["agent_id"] for r in reaped] == ["a1"]
+    assert coordinator.statuses["a1"] == "failed"
+    assert coordinator.statuses["b"] == "running"
+    assert coordinator.statuses["root"] == "running"

@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -45,6 +46,8 @@ class AgentRuntime:
     wake: asyncio.Event = field(default_factory=asyncio.Event)
     mailbox: list[dict[str, Any]] = field(default_factory=list)
     user_wake_required: bool = False
+    # Monotonic time of the agent's last sign of life: a run event or a status change.
+    last_activity: float = field(default_factory=time.monotonic)
 
 
 class AgentCoordinator:
@@ -170,7 +173,7 @@ class AgentCoordinator:
                 "task": task or "",
                 "skills": list(skills or []),
             }
-            self.runtimes.setdefault(agent_id, AgentRuntime())
+            self.runtimes.setdefault(agent_id, AgentRuntime()).last_activity = time.monotonic()
         logger.info("agent.register %s (%s) parent=%s", agent_id, name, parent_id or "-")
         await self._maybe_snapshot()
 
@@ -200,9 +203,48 @@ class AgentCoordinator:
                 self.statuses[agent_id] = "running"
                 self.errors.pop(agent_id, None)
                 self.wait_kinds.pop(agent_id, None)
-                self.runtimes.setdefault(agent_id, AgentRuntime()).user_wake_required = False
+                runtime = self.runtimes.setdefault(agent_id, AgentRuntime())
+                runtime.user_wake_required = False
+                runtime.last_activity = time.monotonic()
                 self._parent_notified.discard(agent_id)
         await self._maybe_snapshot()
+
+    def touch(self, agent_id: str) -> None:
+        """Record a sign of life; called on every run event, so it takes no lock."""
+        runtime = self.runtimes.get(agent_id)
+        if runtime is not None:
+            runtime.last_activity = time.monotonic()
+
+    async def reap_stalled(self, max_silence: float, *, exclude: str) -> list[dict[str, Any]]:
+        """Fail every running agent silent for longer than ``max_silence`` seconds.
+
+        A turn wedged somewhere no timeout covers never reaches a terminal status,
+        so whoever waits on it would wait forever. Cancelling the task ends the
+        wedged turn; the agent's own loop then delivers the terminal notice.
+        """
+        if max_silence <= 0:
+            return []
+        now = time.monotonic()
+        stalled: list[tuple[str, asyncio.Task[Any] | None, float]] = []
+        async with self._lock:
+            for aid, status in self.statuses.items():
+                if aid == exclude or status != "running":
+                    continue
+                runtime = self.runtimes.get(aid)
+                if runtime is None:
+                    continue
+                silence = now - runtime.last_activity
+                if silence >= max_silence:
+                    stalled.append((aid, runtime.task, silence))
+        reaped: list[dict[str, Any]] = []
+        for aid, task, silence in stalled:
+            error = f"agent produced no event for {silence:.0f}s; marked failed as stalled"
+            logger.warning("agent %s stalled: %s", aid, error)
+            await self.set_status(aid, "failed", error=error)
+            if task is not None and not task.done():
+                task.cancel()
+            reaped.append({"agent_id": aid, "name": self.names.get(aid, aid), "error": error})
+        return reaped
 
     async def park_waiting(self, agent_id: str, *, wait_kind: WaitKind) -> None:
         """Park an agent, recording what it is waiting on so the driver can time it."""
@@ -268,6 +310,7 @@ class AgentCoordinator:
                 self._parent_notified.discard(agent_id)
             runtime = self.runtimes.setdefault(agent_id, AgentRuntime())
             runtime.user_wake_required = status in {"failed", "crashed"}
+            runtime.last_activity = time.monotonic()
             runtime.wake.set()
         logger.info("agent.status %s=%s", agent_id, status)
         await self._maybe_snapshot()

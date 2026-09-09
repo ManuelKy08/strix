@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
+from agents.tool_context import ToolContext
 
 from strix.report.dedupe import (
     _check_dependency_duplicate,
@@ -1499,6 +1501,46 @@ async def test_create_reports_persistence_failure_as_tool_error(
     assert "persistence failed" in result["error"]
     assert "file it again" in result["error"]
     assert report_state.vulnerability_reports == []
+
+
+async def test_evidence_only_update_reports_proxy_outage_as_retryable(
+    report_state: ReportState,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _seed_weak_report(report_state)
+    original = dict(report_state.vulnerability_reports[0])
+
+    async def existing_request_ids(
+        _ctx: Any,
+        _request_ids: list[str],
+    ) -> set[str]:
+        raise RuntimeError("Caido client is not available")
+
+    monkeypatch.setattr(reporting_tool, "existing_request_ids", existing_request_ids)
+
+    ctx = ToolContext(
+        context={"agent_id": "root"},
+        tool_name="update_vulnerability_report",
+        tool_call_id="call-1",
+        tool_arguments="{}",
+    )
+    raw = await update_vulnerability_report.on_invoke_tool(
+        ctx,
+        json.dumps(
+            {
+                "report_id": "vuln-0009",
+                "update_reason": "A replay produced a clearer proving exchange.",
+                "http_exchange_ids": ["204"],
+            }
+        ),
+    )
+    result = json.loads(raw)
+
+    assert result["success"] is False
+    assert "No fields to update" not in result["error"]
+    assert "update_vulnerability_report" in result["error"]
+    assert result["report_id"] == "vuln-0009"
+    assert report_state.vulnerability_reports[0] == original
 
 
 def test_update_reports_persistence_failure_as_tool_error(report_state: ReportState) -> None:

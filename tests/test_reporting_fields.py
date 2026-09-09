@@ -1462,7 +1462,7 @@ async def test_http_exchange_ids_must_exist_in_current_proxy_project(
     assert warning is None
 
 
-async def test_http_exchange_ids_are_kept_when_proxy_cannot_be_queried(
+async def test_http_exchange_ids_are_dropped_when_proxy_cannot_be_queried(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def existing_request_ids(
@@ -1478,10 +1478,11 @@ async def test_http_exchange_ids_are_kept_when_proxy_cannot_be_queried(
         ["1042", "1042", "1088"],
     )
 
-    assert request_ids == ["1042", "1088"]
+    assert request_ids is None
     assert errors == []
     assert warning is not None
-    assert "unverified" in warning
+    assert "not stored" in warning
+    assert "update_vulnerability_report" in warning
 
 
 async def test_create_reports_persistence_failure_as_tool_error(

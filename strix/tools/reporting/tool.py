@@ -222,8 +222,9 @@ def _normalize_http_exchange_ids(raw: Any) -> tuple[list[str] | None, list[str]]
     return normalized, errors
 
 
-_HTTP_EXCHANGE_UNVERIFIED_WARNING = (
-    "http_exchange_ids were stored unverified: the proxy project could not be reached"
+_HTTP_EXCHANGE_DROPPED_WARNING = (
+    "http_exchange_ids were not stored: the proxy project could not be reached to verify "
+    "them. Attach them with update_vulnerability_report when the proxy responds again."
 )
 
 
@@ -234,8 +235,9 @@ async def _verify_http_exchange_ids(
     """Verify proxy exchange IDs against the current Caido project.
 
     IDs the project does not know are rejected. When the proxy itself cannot be
-    queried the IDs are kept as given and a warning is returned instead, so a
-    proxy outage never blocks a finding from being filed.
+    queried the IDs are dropped and a warning is returned instead, so a proxy
+    outage never blocks a finding and unverified IDs are never recorded as
+    evidence.
     """
     request_ids, errors = _normalize_http_exchange_ids(raw)
     if request_ids is None or errors or not request_ids:
@@ -248,7 +250,7 @@ async def _verify_http_exchange_ids(
             "Could not verify HTTP exchange IDs against the current Caido project",
             exc_info=True,
         )
-        return request_ids, [], _HTTP_EXCHANGE_UNVERIFIED_WARNING
+        return None, [], _HTTP_EXCHANGE_DROPPED_WARNING
 
     missing_ids = [request_id for request_id in request_ids if request_id not in existing_ids]
     if missing_ids:
@@ -1171,6 +1173,9 @@ async def create_vulnerability_report(
             Omit only when the finding has no captured HTTP evidence (for
             example a static-only code finding). Never invent IDs or drop
             them to bypass a verification error; retry the capture instead.
+            If the result carries a ``warning`` that the IDs were not
+            stored, the finding is filed without them: attach them with
+            ``update_vulnerability_report`` once the proxy responds.
             Keep IDs out of ``evidence`` and all other report text.
 
             **How ``fix_before`` / ``fix_after`` work**: they're used as

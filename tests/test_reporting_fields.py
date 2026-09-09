@@ -1452,13 +1452,73 @@ async def test_http_exchange_ids_must_exist_in_current_proxy_project(
 
     monkeypatch.setattr(reporting_tool, "existing_request_ids", existing_request_ids)
 
-    request_ids, errors = await _verify_http_exchange_ids(
+    request_ids, errors, warning = await _verify_http_exchange_ids(
         cast("Any", object()),
         ["1042", "1088"],
     )
 
     assert request_ids is None
     assert errors == ["http_exchange_ids do not exist in the current proxy project: 1088"]
+    assert warning is None
+
+
+async def test_http_exchange_ids_are_kept_when_proxy_cannot_be_queried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def existing_request_ids(
+        _ctx: Any,
+        _request_ids: list[str],
+    ) -> set[str]:
+        raise RuntimeError("Caido client is not available")
+
+    monkeypatch.setattr(reporting_tool, "existing_request_ids", existing_request_ids)
+
+    request_ids, errors, warning = await _verify_http_exchange_ids(
+        cast("Any", object()),
+        ["1042", "1042", "1088"],
+    )
+
+    assert request_ids == ["1042", "1088"]
+    assert errors == []
+    assert warning is not None
+    assert "unverified" in warning
+
+
+async def test_create_reports_persistence_failure_as_tool_error(
+    report_state: ReportState,
+) -> None:
+    def fail_persistence(_report: dict[str, Any]) -> None:
+        raise RuntimeError("persistence failed")
+
+    report_state.vulnerability_found_callback = fail_persistence
+
+    result = await _do_create(**_CONFIRMED_KWARGS, http_exchange_ids=["1042"])
+
+    assert result["success"] is False
+    assert "persistence failed" in result["error"]
+    assert "file it again" in result["error"]
+    assert report_state.vulnerability_reports == []
+
+
+def test_update_reports_persistence_failure_as_tool_error(report_state: ReportState) -> None:
+    _seed_weak_report(report_state)
+    original = dict(report_state.vulnerability_reports[0])
+
+    def fail_persistence(_report: dict[str, Any]) -> None:
+        raise RuntimeError("persistence failed")
+
+    report_state.vulnerability_updated_callback = fail_persistence
+
+    result = _do_update(
+        report_id="vuln-0009",
+        update_reason="A replay produced a clearer proving exchange.",
+        fields={"http_exchange_ids": ["204"]},
+    )
+
+    assert result["success"] is False
+    assert "persistence failed" in result["error"]
+    assert result["report_id"] == "vuln-0009"
+    assert report_state.vulnerability_reports[0] == original
 
 
 def test_update_vulnerability_report_ignores_identical_content(report_state: ReportState) -> None:

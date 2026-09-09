@@ -222,27 +222,51 @@ def _normalize_http_exchange_ids(raw: Any) -> tuple[list[str] | None, list[str]]
     return normalized, errors
 
 
+_HTTP_EXCHANGE_UNVERIFIED_WARNING = (
+    "http_exchange_ids were stored unverified: the proxy project could not be reached"
+)
+
+
 async def _verify_http_exchange_ids(
     ctx: RunContextWrapper,
     raw: Any,
-) -> tuple[list[str] | None, list[str]]:
-    """Verify proxy exchange IDs against the current Caido project."""
+) -> tuple[list[str] | None, list[str], str | None]:
+    """Verify proxy exchange IDs against the current Caido project.
+
+    IDs the project does not know are rejected. When the proxy itself cannot be
+    queried the IDs are kept as given and a warning is returned instead, so a
+    proxy outage never blocks a finding from being filed.
+    """
     request_ids, errors = _normalize_http_exchange_ids(raw)
     if request_ids is None or errors or not request_ids:
-        return request_ids, errors
+        return request_ids, errors, None
 
     try:
         existing_ids = await existing_request_ids(ctx, request_ids)
-    except Exception:
-        logger.exception("Could not verify HTTP exchange IDs against the current Caido project")
-        return None, ["http_exchange_ids could not be verified against the current proxy project"]
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "Could not verify HTTP exchange IDs against the current Caido project",
+            exc_info=True,
+        )
+        return request_ids, [], _HTTP_EXCHANGE_UNVERIFIED_WARNING
 
     missing_ids = [request_id for request_id in request_ids if request_id not in existing_ids]
     if missing_ids:
-        return None, [
-            "http_exchange_ids do not exist in the current proxy project: " + ", ".join(missing_ids)
-        ]
-    return request_ids, []
+        return (
+            None,
+            [
+                "http_exchange_ids do not exist in the current proxy project: "
+                + ", ".join(missing_ids)
+            ],
+            None,
+        )
+    return request_ids, [], None
+
+
+def _with_warning(result: dict[str, Any], warning: str | None) -> dict[str, Any]:
+    if warning and result.get("success"):
+        result["warning"] = warning
+    return result
 
 
 def _validate_cvss_breakdown(breakdown: Any) -> list[str]:
@@ -626,13 +650,24 @@ def _do_update(
     if class_error is not None:
         return class_error
 
-    updated = report_state.update_vulnerability_report(
-        report_id,
-        changes,
-        update_reason=update_reason,
-        updated_by_agent_id=agent_id,
-        updated_by_agent_name=agent_name,
-    )
+    try:
+        updated = report_state.update_vulnerability_report(
+            report_id,
+            changes,
+            update_reason=update_reason,
+            updated_by_agent_id=agent_id,
+            updated_by_agent_name=agent_name,
+        )
+    except Exception as e:
+        logger.exception("update_vulnerability_report persistence failed")
+        return {
+            "success": False,
+            "error": (
+                f"Failed to revise report '{report_id}': {e!s}. "
+                "The report still carries its previous content; retry the update."
+            ),
+            "report_id": report_id,
+        }
     if updated is None:
         known = [r.get("id") for r in report_state.get_existing_vulnerabilities()]
         if report_id not in known:
@@ -819,9 +854,15 @@ async def _do_create(
             agent_id=agent_id if isinstance(agent_id, str) else None,
             agent_name=agent_name if isinstance(agent_name, str) else None,
         )
-    except (ImportError, AttributeError) as e:
+    except Exception as e:
         logger.exception("create_vulnerability_report persistence failed")
-        return {"success": False, "error": f"Failed to create vulnerability report: {e!s}"}
+        return {
+            "success": False,
+            "error": (
+                f"Failed to create vulnerability report: {e!s}. "
+                "The finding was not stored; file it again."
+            ),
+        }
     else:
         logger.info(
             "Vulnerability report created: id=%s severity=%s cvss=%.1f title=%s",
@@ -1278,10 +1319,11 @@ async def create_vulnerability_report(
             reduce impact and lower the severity.
         fix_effort: "low"
     """
-    http_exchange_ids, http_exchange_errors = await _verify_http_exchange_ids(
-        ctx,
+    (
         http_exchange_ids,
-    )
+        http_exchange_errors,
+        http_exchange_warning,
+    ) = await _verify_http_exchange_ids(ctx, http_exchange_ids)
     if http_exchange_errors:
         return json.dumps(
             {
@@ -1323,7 +1365,7 @@ async def create_vulnerability_report(
         agent_id=agent_id,
         agent_name=agent_name,
     )
-    return json.dumps(result, ensure_ascii=False, default=str)
+    return json.dumps(_with_warning(result, http_exchange_warning), ensure_ascii=False, default=str)
 
 
 @function_tool(timeout=60, strict_mode=False)
@@ -1433,10 +1475,11 @@ async def update_vulnerability_report(
             observed in this codebase that justifies the contextual
             ``cvss_breakdown``.
     """
-    http_exchange_ids, http_exchange_errors = await _verify_http_exchange_ids(
-        ctx,
+    (
         http_exchange_ids,
-    )
+        http_exchange_errors,
+        http_exchange_warning,
+    ) = await _verify_http_exchange_ids(ctx, http_exchange_ids)
     if http_exchange_errors:
         return json.dumps(
             {
@@ -1483,7 +1526,7 @@ async def update_vulnerability_report(
         agent_id=agent_id,
         agent_name=agent_name,
     )
-    return json.dumps(result, ensure_ascii=False, default=str)
+    return json.dumps(_with_warning(result, http_exchange_warning), ensure_ascii=False, default=str)
 
 
 _DEP_SEVERITY_FROM_CVSS = {
@@ -1873,9 +1916,15 @@ async def _do_create_dependency(  # noqa: PLR0912
             agent_id=agent_id if isinstance(agent_id, str) else None,
             agent_name=agent_name if isinstance(agent_name, str) else None,
         )
-    except (ImportError, AttributeError) as e:
+    except Exception as e:
         logger.exception("create_dependency_report persistence failed")
-        return {"success": False, "error": f"Failed to create dependency report: {e!s}"}
+        return {
+            "success": False,
+            "error": (
+                f"Failed to create dependency report: {e!s}. "
+                "The finding was not stored; file it again."
+            ),
+        }
     else:
         logger.info(
             "Dependency report created: id=%s cve=%s package=%s severity=%s",

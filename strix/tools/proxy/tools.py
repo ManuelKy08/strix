@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import functools
 import json
 import logging
 import re
@@ -85,9 +86,7 @@ async def existing_request_ids(
     for request_id in request_ids:
         result = await _call(
             client,
-            lambda client, request_id=request_id: caido_api.get_request_with_client(
-                client, request_id
-            ),
+            functools.partial(caido_api.get_request_with_client, request_id=request_id),
         )
         if result is not None:
             existing.add(str(result.request.id))
